@@ -43,8 +43,14 @@ would.
 
 ### Proof it worked
 
-Twilio console sending inbound test messages to the local `/sms` webhook
-(via an `ngrok` tunnel), and The Cookie Man replying in character:
+The `ngrok` request inspector showing a real inbound Twilio webhook hitting
+the local `/sms` endpoint and the actual TwiML response — The Cookie Man
+replying in character ("I'm here. The west oven's humming, which means the
+Bureau has cleared the line—what happened?"):
+
+![ngrok inspector showing The Cookie Man's TwiML reply](docs/screenshots/ngrok-inspector-cookie-man-reply.png)
+
+The Twilio console sending inbound test messages to that same webhook:
 
 ![Twilio console inbound SMS test](docs/screenshots/twilio-console-inbound-sms.png)
 
