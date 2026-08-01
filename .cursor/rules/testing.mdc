@@ -1,0 +1,31 @@
+---
+description: Testing requirements for The Cookie Man
+alwaysApply: true
+---
+
+# Testing Rules
+
+Testing is first-class, not an afterthought.
+
+- New behavior should normally include automated tests in the same change.
+- Every bug fix should include a regression test when reasonably possible.
+- `npm test` must run the project's normal automated test suite.
+
+## Determinism & isolation
+
+- Tests must be deterministic — no flaky timing, randomness, or ordering
+  dependence.
+- Unit tests must not make real network requests.
+- Automated tests must **never** call the real OpenAI API.
+- Automated tests must **never** send a real SMS message.
+- External systems (OpenAI, Twilio) must be replaceable with fakes, mocks,
+  or test implementations — this is a direct consequence of the AI
+  provider abstraction and transport boundaries in the architecture rule.
+
+## What to test
+
+- Prefer testing behavior and contracts (inputs/outputs, HTTP status codes,
+  what the Cookie Man service does with a given AI response) over internal
+  implementation details.
+- Do not weaken or delete tests just to make them pass — fix the underlying
+  issue instead.

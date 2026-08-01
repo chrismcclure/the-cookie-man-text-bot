@@ -1,0 +1,56 @@
+---
+description: How an AI agent should approach changes in this repository
+alwaysApply: true
+---
+
+# AI Development Workflow
+
+This rule governs how any AI model/agent (not just the one that wrote it)
+should work in this repository, so behavior stays consistent across models.
+
+## Project status file
+
+`PROJECT_STATUS.md` at the repo root is the source of truth for the
+project's *current* state (not a chronological diary — Git history covers
+that).
+
+- Read `PROJECT_STATUS.md` before beginning any significant work, so you
+  understand what already exists, what's in progress, and what's next.
+- After completing a meaningful development slice, update
+  `PROJECT_STATUS.md` to reflect the new current state: revise or remove
+  stale sections rather than appending to them.
+- Never claim a capability exists in `PROJECT_STATUS.md` because it's
+  merely planned, and never claim tests pass there unless they were
+  actually run in that session.
+
+## Before modifying code
+
+1. Read `PROJECT_STATUS.md` first to understand current state.
+2. Inspect the relevant existing files.
+3. Understand the existing architecture (see `architecture.mdc`).
+4. Preserve working behavior unless the requested feature intentionally
+   changes it.
+5. Prefer extending existing patterns over creating parallel implementations.
+
+## While implementing
+
+1. Make small, coherent changes.
+2. Add or update tests alongside the change (see `testing.mdc`).
+3. Run the relevant tests.
+4. Resolve failures caused by the change.
+5. Do not weaken tests simply to make them pass.
+
+## After implementing
+
+1. Run the full test suite.
+2. Summarize which files changed and why.
+3. Explain any meaningful architectural decisions made along the way.
+4. Call out anything left incomplete or deferred.
+5. Never claim something was tested if it wasn't actually run.
+6. If this was a meaningful, completed development slice, update
+   `PROJECT_STATUS.md` accordingly.
+
+## Scope discipline
+
+- Do not make unrelated refactors unless necessary for the requested change.
+- Do not rewrite working code merely because another style is possible.

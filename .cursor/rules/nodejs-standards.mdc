@@ -1,0 +1,54 @@
+---
+description: Node.js coding standards, comments, error handling, and dependency policy
+alwaysApply: true
+---
+
+# Node.js Standards
+
+- Use modern Node.js and ES modules (`import`/`export`), not CommonJS.
+- Prefer `async/await` over raw Promise chains or callbacks.
+- Prefer small, focused modules and functions with descriptive names.
+- Avoid deeply nested control flow — extract functions/early-return instead.
+- Avoid giant files; split by responsibility (transport, service, provider).
+- `index.js` is a startup/composition entry point only. It wires transports,
+  services, and providers together — it must not contain application or
+  Cookie Man logic.
+- Use the official SDK for an external service (e.g. OpenAI, Twilio) rather
+  than hand-rolling HTTP calls against their API.
+
+## Comments
+
+Comment intent, not mechanics.
+
+- Explain *why* an architectural decision exists, surprising behavior,
+  external-service constraints, security considerations, or unusual
+  business rules.
+- Do not add comments that just translate obvious code into English.
+
+```javascript
+// Good: explains why, not what
+// Keep the AI provider injectable so tests never spend OpenAI tokens.
+
+// Bad: narrates the obvious
+// Set message equal to req.body.message.
+const message = req.body.message;
+```
+
+## Error Handling
+
+- Validate input at system boundaries (transport handlers).
+- Return appropriate, useful HTTP status codes.
+- Never leak raw upstream exceptions, stack traces, API keys, tokens, or
+  config values to callers.
+- Log enough context to diagnose failures, but never log secrets or
+  unnecessary personal data.
+- Handle failures from external APIs (OpenAI, Twilio) deliberately — don't
+  let them bubble up unhandled.
+
+## Dependencies
+
+- Don't add a package if Node's platform APIs or an existing dependency
+  already reasonably solve the problem.
+- Before adding a dependency, ask whether it's actually necessary.
+- Use maintained, widely-adopted packages for important infrastructure.
+- Don't silently introduce major libraries or frameworks — call it out.

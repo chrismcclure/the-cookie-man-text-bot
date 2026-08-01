@@ -1,0 +1,115 @@
+# The Cookie Man — Project Status
+
+## Current Goal
+
+OpenAI is live and the persona is tuned. Inbound SMS via Twilio has a
+working local `/sms` webhook endpoint (TwiML reply, no outbound REST call),
+and it now **enforces Twilio request-signature validation** before doing
+anything else — unsigned/incorrectly-signed requests are rejected before
+`CookieManService` is ever invoked. All of this is unit-tested and manually
+smoke-tested against a locally running server. **Real end-to-end SMS through
+an actual Twilio phone number/public webhook has NOT been done yet** —
+that's the next manual step (a tunnel still needs to be set up).
+
+## Architecture
+
+```
+HTTP request → POST /chat                    Twilio inbound SMS → POST /sms
+       ↓                                              ↓
+                                              verifyTwilioRequest({ req, params })
+                                              (src/sms/twilioRequestVerifier.js —
+                                               rejects before anything below runs
+                                               if missing/invalid X-Twilio-Signature)
+                                                       ↓
+src/http/createApp.js — thin node:http transport for both routes
+(parse/validate request, translate CookieManService's result into the
+ right response shape per transport: JSON for /chat, TwiML for /sms)
+       ↓
+CookieManService.respond(userMessage)
+       ↓
+aiProvider.generateReply({ instructions, message })   ← injected dependency, duck-typed
+       ↓
+src/aiProviders/openaiProvider.js   (real OpenAI, used when OPENAI_API_KEY is set)
+  or
+src/aiProviders/stubAiProvider.js   (placeholder, used otherwise outside production)
+```
+
+- `src/cookieMan/cookieManPrompt.js` — centralized persona text (`COOKIE_MAN_INSTRUCTIONS`). Untouched by the Twilio work.
+- `src/cookieMan/cookieManService.js` — `CookieManService` class; validates input, adds persona, delegates to an injected `aiProvider`. Untouched by the Twilio signature work — `CookieManService` knows nothing about Twilio, HTTP, or authentication of any kind.
+- `src/http/createApp.js` — `createApp({ cookieManService, verifyTwilioRequest })`; thin `node:http` transport serving `POST /chat` (JSON) and `POST /sms` (Twilio form-encoded webhook → TwiML reply). `/sms` now calls the injected `verifyTwilioRequest({ req, params })` before looking at `Body` or calling `cookieManService` at all; a missing/failing verifier means every `/sms` request is rejected with `403` — there is no development-mode bypass.
+- `src/sms/verifyTwilioSignature.js` — `verifyTwilioSignature({ authToken, signature, url, params })`; low-level wrapper around the Twilio SDK's local (no-network) HMAC signature check (`twilio.validateRequest`). Unchanged from the prior slice.
+- `src/sms/twilioRequestVerifier.js` — **new**. `createTwilioRequestVerifier({ authToken, webhookBaseUrl })` returns a `verifyTwilioRequest({ req, params })` function: pulls the `X-Twilio-Signature` header off the raw request, reconstructs the *public* URL Twilio believes it called (`webhookBaseUrl` + the request path — not the request's own host/protocol), and delegates the actual HMAC check to `verifyTwilioSignature`. This is the "small validator component" injected into `createApp`.
+- `src/aiProviders/openaiProvider.js` / `openaiConfig.js` / `stubAiProvider.js` — unchanged by the Twilio work.
+- `src/index.js` — startup/composition entry point. Builds the AI provider (unchanged from before) and now also builds `verifyTwilioRequest` from `TWILIO_AUTH_TOKEN`/`TWILIO_WEBHOOK_BASE_URL`; if either is missing, passes `undefined` through (with a one-time startup warning) so `/sms` fails closed rather than skipping validation. `/chat` is completely unaffected either way.
+
+## Completed
+
+- **`CookieManService`** — accepts an `aiProvider` dependency, sends the user's message plus the centralized persona to it, and returns the provider's response unchanged. Rejects blank/whitespace-only/non-string input without calling the provider.
+  - Covered by `tests/cookieManService.test.js` (6 tests).
+- **HTTP `POST /chat`** — accepts `{ "message": "..." }`, validates it at the transport boundary, delegates to the injected `CookieManService`, and returns `{ "response": "..." }` on success. Missing/blank/non-string `message` → HTTP 400. Unexpected errors → HTTP 500 with a generic body; the real error is only logged server-side.
+  - Covered by `tests/httpChat.test.js` (8 tests).
+- **OpenAI AI-provider adapter (`createOpenAiProvider`)** — implemented against the OpenAI Responses API using the official `openai` npm package (v7.3.0). Unit-tested with a local fake OpenAI SDK client (no real API calls in automated tests, no `OPENAI_API_KEY` required to run the test suite).
+  - Covered by `tests/openaiProvider.test.js` (6 tests): requires an injected client (never silently reads env vars itself), sends the Cookie Man instructions, sends the user's message, supplies the centrally configured model, extracts and returns only the generated text, and propagates SDK failures as a rejected `Error` (with the original SDK error preserved as `.cause` for server-side logs, not exposed to callers).
+  - **Manually verified against the real OpenAI API** — the user set a real `OPENAI_API_KEY`, ran `npm start`, and confirmed a live `POST /chat` request returns a real, in-character response from `gpt-5.6-luna` (not the stub). This is now genuinely integration-verified, not just unit-tested.
+- **Startup composition (`src/index.js`)** picks the AI provider based on environment:
+  - `OPENAI_API_KEY` set → real `createOpenAiProvider`.
+  - Not set, `NODE_ENV !== 'production'` → `createStubAiProvider`, with a `console.warn` making the fallback obvious (never silent).
+  - Not set, `NODE_ENV === 'production'` → throws at startup and refuses to run, rather than silently serving fake replies in production.
+- Added `.env.example` (placeholder values only) and wired `npm start` / `npm run dev` to auto-load `.env` via Node's built-in `--env-file-if-exists` flag — no `dotenv` dependency needed. `.env` was already gitignored and confirmed untracked.
+- Bumped `package.json` `engines.node` to `>=22` to match the OpenAI SDK's minimum supported Node version (already what the `Dockerfile` uses).
+- **Cookie Man persona tuned based on a real OpenAI response.** The original persona produced generic-assistant-flavored output (numbered troubleshooting lists, "contact the manufacturer" customer-service advice). `src/cookieMan/cookieManPrompt.js` was revised to explicitly reject assistant/customer-service framing, prefer one or two short text-message-style paragraphs, avoid numbered lists/bullets unless they're themselves the joke, avoid forcing a cookie reference into every reply, and avoid emoji overuse — while keeping the Cookie Bureau/crumb-tunnel/quality-control world-building and the "treat ridiculous cookie matters with total seriousness" tone. No HTTP, service, or provider code changed.
+  - Added `tests/cookieManPrompt.test.js` (5 tests) as a light guardrail against regressing these persona requirements — checks for a few thematically important keywords/phrases (e.g. "cookie bureau", "not an assistant", "numbered list"/"bullet", "sms"/"short") rather than exact wording, so the prose can keep evolving without breaking tests. The pre-existing `CookieManService` test that checks the persona is passed through to the provider asserts identity against the imported `COOKIE_MAN_INSTRUCTIONS` constant, not literal text, so it required no changes.
+- **Twilio inbound SMS (`POST /sms`)** — added to `src/http/createApp.js` alongside the existing `POST /chat`. Accepts Twilio's `application/x-www-form-urlencoded` webhook payload, reads the `Body` field, calls the same injected `cookieManService.respond()` used by `/chat`, and wraps the reply in TwiML (`<Response><Message>...</Message></Response>`) built with the official `twilio` SDK's `MessagingResponse` (so text is correctly XML-escaped without hand-rolled escaping code). Missing/blank `Body` → HTTP 400. If `CookieManService` throws, the route still returns `200` with an apologetic TwiML message (not a bare 5xx) — this is a deliberate difference from `/chat`'s JSON 500, reasoned about below — and the real error is only logged server-side, never exposed.
+  - Covered by `tests/httpSms.test.js` (7 tests, mapping directly to the requested checklist): 200 for a valid payload, `Body` passed through to `CookieManService` unchanged, response is valid TwiML wrapping the service's reply, response `Content-Type` is XML, 400 for missing `Body`, 400 for blank `Body`, and a `CookieManService` failure is handled safely (no leaked error/stack, still valid TwiML). All tests inject a fake `cookieManService` (same pattern as `/chat`'s tests) — zero OpenAI calls and zero Twilio network calls in automated tests; the Twilio SDK is only used locally for XML building/HMAC math, never a REST call.
+  - Re-ran the full suite after this change — all pre-existing `/chat` tests still pass unmodified, confirming `/chat` behavior is unaffected.
+  - **Manually smoke-tested locally only** — started the app and confirmed `curl` with a Twilio-shaped form-encoded POST returns 200 with correct TwiML/XML when properly signed (see below), missing/blank `Body` still returns 400 once past signature validation, and `/chat` still works. **No real Twilio account, phone number, or webhook URL has been configured, and no real SMS has been sent or received.** Do not consider SMS "working end-to-end" until that manual step happens.
+- **Twilio webhook signature validation is now implemented and enforced on `/sms`.** New `src/sms/twilioRequestVerifier.js` (`createTwilioRequestVerifier`) builds an injectable `verifyTwilioRequest({ req, params })` function on top of the existing `verifyTwilioSignature`; `createApp`'s `/sms` handler calls it before touching `Body` or `CookieManService` at all, rejecting with `403 Forbidden` (a generic, fixed message — never revealing whether the signature was missing, malformed, or simply wrong) if it's missing or fails. There is no development-mode bypass: if no verifier is configured at all, `/sms` fails closed and rejects every request.
+  - Covered by `tests/twilioRequestVerifier.test.js` (6 tests): requires an auth token, requires a webhook base URL, accepts a request bearing a genuine signature *generated by the Twilio SDK's own `getExpectedTwilioSignature`* (not our own crypto), rejects a request whose params were tampered with after signing (proves the full form payload is covered by the signature, not just part of it), rejects an incorrect signature, and rejects a request with no signature header at all.
+  - Covered by `tests/httpSmsSignature.test.js` (5 tests): accepts a request an injected verifier approves and invokes `CookieManService`; rejects a request the verifier disapproves and never invokes `CookieManService`; rejects a request with no signature header and never invokes `CookieManService`; fails closed when no verifier is configured at all; and — using no fakes at all — accepts a **genuinely Twilio-signed request end-to-end**, generated via the real SDK signing function and verified via the real `createTwilioRequestVerifier`, where the configured public webhook URL deliberately differs from the physical address the test server listens on (proving the tunnel/proxy scenario works).
+  - Refactored `tests/verifyTwilioSignature.test.js` (pre-existing, from the prior slice) to generate test signatures via the Twilio SDK's own `getExpectedTwilioSignature` instead of a hand-rolled HMAC reimplementation — one less place doing crypto math ourselves.
+  - Updated the pre-existing `tests/httpSms.test.js` (business-logic tests for `/sms`, written before signature enforcement existed) to inject an always-approving fake verifier, so they keep testing what they always tested (Body validation, TwiML shape, error handling) without becoming signature tests themselves. No assertions in that file were weakened — they needed a new required collaborator, the same way they already inject a fake `cookieManService`.
+  - All of the above use fabricated auth tokens/signatures — **zero tests use the real `TWILIO_AUTH_TOKEN` or `TWILIO_ACCOUNT_SID` from `.env`, and zero tests make a network call to Twilio** (signature validation is pure local HMAC math). `/sms`'s business-logic tests still inject a fake `cookieManService`, so zero OpenAI calls either.
+  - Wired into composition: `src/index.js` builds `verifyTwilioRequest` from `TWILIO_AUTH_TOKEN` + `TWILIO_WEBHOOK_BASE_URL`; if either is unset, it passes `undefined` (with a startup warning) so `/sms` fails closed. **Manually confirmed**: with `TWILIO_WEBHOOK_BASE_URL` unset (no tunnel configured yet), an ordinary unsigned `curl` to a locally running `/sms` correctly returns `403 Forbidden`, while `/chat` is unaffected. This is expected and correct — see "Next".
+- Updated `.env.example`: `TWILIO_AUTH_TOKEN` and the new `TWILIO_WEBHOOK_BASE_URL` are documented as required together for `/sms` to accept anything; `TWILIO_ACCOUNT_SID` is noted as only needed for a future outbound-sending feature, not for signature validation (which never uses it).
+- Cursor project rules established in `.cursor/rules/` (architecture, Node.js standards, testing, security, AI agent workflow, Cookie Man persona).
+
+## Current Test Status
+
+Last run: `npm test` (`node --test`) — **46 passing, 0 failing** (5 `COOKIE_MAN_INSTRUCTIONS persona` + 6 `CookieManService` + 8 `POST /chat` + 7 `POST /sms` + 5 `POST /sms Twilio signature enforcement` + 6 `createOpenAiProvider` + 6 `createTwilioRequestVerifier` + 3 `verifyTwilioSignature`).
+
+## In Progress
+
+Nothing is currently mid-implementation. `/sms` is code-complete with signature enforcement, fully unit-tested, and locally smoke-tested (including confirming unsigned requests are correctly rejected), but not yet verified against real Twilio traffic.
+
+## Next
+
+1. **Set up a public HTTPS tunnel** (e.g. ngrok or similar — not yet done, intentionally, per this slice's scope) pointing at the local app, and set `TWILIO_WEBHOOK_BASE_URL` to that tunnel's HTTPS URL in `.env`.
+2. Configure a real Twilio phone number's SMS webhook to point at `<tunnel-url>/sms`, and confirm `TWILIO_AUTH_TOKEN` in `.env` matches that Twilio account.
+3. Send a real text message to that number and confirm a real Cookie Man reply arrives. Only after that should SMS be marked as working end-to-end — signature validation being implemented and locally tested is not the same as having proven it against real Twilio traffic.
+4. Consider outbound REST-API sending (proactive/async messages) if a future use case needs it — out of scope for v1, which relies entirely on the inbound-webhook-reply flow.
+
+## Important Decisions
+
+- **AI provider is duck-typed**, not a formal interface/base class: any object exposing `async generateReply({ instructions, message })` works. This is what let the OpenAI provider slot in without changing `CookieManService` or the HTTP layer at all.
+- **The OpenAI SDK client is injected into `createOpenAiProvider`, not constructed inside it.** The provider throws if no client is given rather than falling back to building one from `process.env` itself. This is what makes the provider fully unit-testable with a fake client and zero real API calls/keys, and keeps "which provider, built how" entirely a composition-root (`src/index.js`) decision.
+- **Chose `gpt-5.6-luna` as the model** (centralized in `src/aiProviders/openaiConfig.js`, overridable via `OPENAI_MODEL`): of the current GPT-5.6 family (`sol` flagship, `terra` balanced, `luna` cost/latency-optimized), Luna is explicitly OpenAI's fastest and cheapest model and doesn't sacrifice capability the Cookie Man's short, casual SMS-style replies need. Sol/Terra's extra reasoning depth isn't needed for this use case and costs meaningfully more per token.
+- **Used the OpenAI Responses API** (`client.responses.create`) rather than the older Chat Completions API — it's the SDK's primary/recommended API for new integrations and provides the simpler `response.output_text` accessor.
+- **OpenAI SDK failures are re-thrown as a plain `Error`** (with the original SDK error attached via the standard `cause` field) rather than left as raw OpenAI SDK error objects. This keeps OpenAI-specific error types from leaking past the provider boundary, consistent with `CookieManService`'s existing plain-`Error` style, while still preserving full detail for server-side logs.
+- **No HTTP framework (e.g. Express) was added**, and this phase didn't need to touch `createApp.js` or `CookieManService` at all — confirming the provider abstraction is doing its job.
+- **No `dotenv` dependency added.** Node's built-in `--env-file-if-exists` flag (wired into the `start`/`dev` npm scripts) loads `.env` without another dependency.
+- **Environment-based provider selection lives in `src/index.js`**, not in `CookieManService` or the provider modules, per the "keep environment-specific logic out of the service" guidance. Missing `OPENAI_API_KEY` in production is a hard startup failure (not a silent fallback); outside production it falls back to the stub with an explicit, unmissable console warning.
+- **Persona guardrail tests assert on keywords/phrases, not exact prose.** Testing the literal persona string verbatim would make the file brittle to legitimate future tone tweaks; asserting a handful of concept-level keywords protects the requirements that actually matter (no assistant tone, no forced lists, short/SMS-appropriate) while leaving wording free to evolve.
+- **`/sms` shares `cookieManService` with `/chat` rather than being wired to its own provider.** Both routes are just different translations of the same request/response contract; `createApp({ cookieManService })` taking a single dependency and routing both `/chat` and `/sms` through it is what keeps `CookieManService`'s contract genuinely transport-agnostic, and is why this slice needed zero changes to `CookieManService`, the persona, or either AI provider.
+- **Used the Twilio SDK's `MessagingResponse` for TwiML, not hand-rolled XML.** Building `<Response><Message>...</Message></Response>` by string concatenation would require correctly escaping `&`, `<`, `>`, and quotes in arbitrary AI-generated text — exactly the kind of easy-to-get-subtly-wrong logic the official SDK exists to handle. This is the "materially simplifies correct output" case the task called out.
+- **`/sms` returns `200` + an apologetic TwiML message on internal failure, instead of a bare `500` like `/chat`.** This is an intentional divergence: a real person is waiting for a text reply, and Twilio only relays a reply to the sender when the webhook returns valid TwiML — a `5xx` here would just mean the texter gets silence instead of an apology. `/chat`'s JSON `500` remains appropriate for that transport's general-purpose HTTP callers.
+- **No outbound Twilio REST API call was added.** Per the requested v1 design, replies flow entirely through the inbound webhook's TwiML response — Twilio delivers that TwiML back to the original sender itself. This avoids needing a Twilio REST client, `TWILIO_ACCOUNT_SID`-based sending, or a "from" phone number configured in this phase.
+- **Signature validation is layered: `verifyTwilioSignature` (pure HMAC math) → `twilioRequestVerifier` (knows about the header name and public-URL reconstruction) → `createApp` (calls it as an opaque injected function).** This keeps `createApp` from needing to know *how* Twilio signs anything, keeps the pure-crypto layer trivially testable with fabricated tokens, and keeps the "which header, which URL" concerns in one small, independently-testable place.
+- **A `TWILIO_WEBHOOK_BASE_URL` env var was introduced, rather than trusting `req.headers.host` or `X-Forwarded-*` headers.** Once this app sits behind a tunnel/proxy, Twilio signs the *public* URL (e.g. `https://something.example/sms`), but the request physically arrives here as plain HTTP on `localhost:PORT` — those are different strings, and using the request's own idea of its host/protocol would simply never validate correctly. The alternative — trusting `X-Forwarded-Host`/`X-Forwarded-Proto` — means trusting whatever any client claims about how it was proxied, which is unsafe unless the proxy is both known and enforced to strip/overwrite those headers, which we haven't set up. An explicit env var naming the one true public webhook URL is the smallest, safest option: no header-spoofing surface, and no proxy-trust configuration needed at all.
+- **No development-mode signature bypass exists anywhere.** There's no `NODE_ENV === 'test'`-style escape hatch in production code (unlike some common Twilio/Express examples). The only way tests exercise the "approved" path without a real signature is by injecting a fake `verifyTwilioRequest` function directly — a test-only construct that never ships. In the real app, `/sms` either validates a genuine signature or rejects; the only variable is whether `TWILIO_AUTH_TOKEN`/`TWILIO_WEBHOOK_BASE_URL` are configured at all.
+- **`403 Forbidden` was chosen for signature failures**, and the response body is a fixed, generic `"Forbidden"` string in every failure case (missing header, malformed signature, wrong signature) — deliberately not distinguishing between them, so a would-be attacker can't use the response to iterate toward a forgeable request. The server-side `console.warn` is similarly generic and never logs the signature, computed signature, or auth token.
+- **Pre-existing `tests/httpSms.test.js` was updated (not replaced) to inject an always-approving fake verifier.** This wasn't "weakening" that test file — those tests were never about authentication, and asserting business-logic behavior (Body validation, TwiML shape, error handling) independently of a new required auth collaborator is standard practice, exactly analogous to how they already inject a fake `cookieManService` instead of a real AI provider.
+
+## External Integrations
+
+- **OpenAI** — Provider implemented (`src/aiProviders/openaiProvider.js`, Responses API, model `gpt-5.6-luna`), unit-tested with a fake SDK client, and **manually verified against the real OpenAI API** by the user via `npm start` + a live `curl` request.
+- **Twilio** — `twilio` npm package (v6.0.2). Inbound SMS webhook (`POST /sms`) implemented, unit-tested, and **manually smoke-tested locally only**. Request-signature validation is now implemented **and enforced** on `/sms` (unit-tested, including with genuine SDK-generated signatures; manually confirmed that an unsigned local `curl` request is correctly rejected with `403`). **No real Twilio account, phone number, or public webhook URL has been configured, no tunnel has been set up, and no real SMS has been sent or received through Twilio.** Do not mark end-to-end SMS as working until that real round-trip happens — signature validation being correct in isolation is necessary but not sufficient proof of that.

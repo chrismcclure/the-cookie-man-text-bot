@@ -1,0 +1,46 @@
+---
+description: Project purpose and layered architecture for The Cookie Man
+alwaysApply: true
+---
+
+# The Cookie Man — Purpose & Architecture
+
+This is a Node.js app that lets people talk to an AI-powered fictional
+character, **The Cookie Man**, over multiple transports:
+
+1. A local HTTP `/chat` endpoint.
+2. SMS via Twilio.
+3. More transports may be added later.
+
+## Layering (strict separation of concerns)
+
+```
+Transport layer  (HTTP route, Twilio webhook, future transports)
+       ↓
+Application / Cookie Man service  (persona, conversation behavior)
+       ↓
+AI provider abstraction  (interface, not tied to any vendor)
+       ↓
+OpenAI implementation  (the only place that knows about OpenAI)
+```
+
+Rules that follow from this:
+
+- Transports (HTTP handlers, Twilio webhook handlers) contain **no** Cookie
+  Man personality or business logic. They only translate a request into a
+  call into the Cookie Man service and translate the result back into a
+  response.
+- The Cookie Man service does not know or care whether a message came from
+  HTTP, SMS, or anything else.
+- OpenAI-specific code (SDK calls, request/response shapes, model names)
+  stays behind an AI provider boundary/interface so it can be swapped for a
+  fake in tests or a different provider later without touching the Cookie
+  Man service.
+
+## Keep it simple
+
+- Do not introduce DI containers, repository patterns, service locators, or
+  other enterprise abstractions for their own sake.
+- Prefer the simplest code that preserves the boundaries above.
+- This is a real project we're practicing good habits on — not a throwaway
+  demo, but also not an excuse to overengineer.

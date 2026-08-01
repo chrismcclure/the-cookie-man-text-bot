@@ -1,0 +1,19 @@
+---
+description: Security and configuration rules for secrets, env vars, and webhooks
+alwaysApply: true
+---
+
+# Security & Configuration
+
+- Never hard-code API keys, secrets, credentials, or tokens in source.
+- Secrets come from environment variables or an appropriate secret-management
+  mechanism — never from committed files.
+- Never commit `.env` files containing real credentials; maintain an
+  appropriate `.gitignore` for this.
+- When environment configuration needs documenting, provide `.env.example`
+  with placeholder values only (e.g. `OPENAI_API_KEY=sk-...`).
+- Treat all inbound webhook content (e.g. Twilio SMS payloads) as untrusted
+  input — validate and sanitize at the transport boundary.
+- Before the Twilio SMS integration is considered production-ready, validate
+  webhook authenticity using Twilio's recommended request-signature
+  verification mechanism.
